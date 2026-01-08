@@ -1,149 +1,649 @@
-package com.example.whatsappordering;
+package com.easyfind.whatsapp.ordering_system.controller;
 
-import com.example.whatsappordering.dto.WebhookRequest;
-import com.example.whatsappordering.service.WhatsAppService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
+import com.easyfind.whatsapp.ordering_system.entity.Cart;
+import com.easyfind.whatsapp.ordering_system.entity.CartItem;
+import com.easyfind.whatsapp.ordering_system.entity.Customer;
+import com.easyfind.whatsapp.ordering_system.entity.Franchise;
+import com.easyfind.whatsapp.ordering_system.entity.Menu;
+import com.easyfind.whatsapp.ordering_system.entity.Category;
+import com.easyfind.whatsapp.ordering_system.entity.Order;
+import com.easyfind.whatsapp.ordering_system.service.CartService;
+import com.easyfind.whatsapp.ordering_system.service.CustomerService;
+import com.easyfind.whatsapp.ordering_system.service.CustomerStateService;
+import com.easyfind.whatsapp.ordering_system.service.MenuService;
+import com.easyfind.whatsapp.ordering_system.service.OrderService;
+import com.easyfind.whatsapp.ordering_system.service.PaymentService;
+import com.easyfind.whatsapp.ordering_system.service.WhatsappApiService;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Comparator;
 
 @RestController
-@RequestMapping("/whatsapp")
-public class WhatsAppController {
+@RequestMapping({ "/webhook", "/api/v1/webhook" })
+public class WebhookController {
 
-    @Autowired
-    private WhatsAppService whatsAppService;
-    
-    @Autowired
-    private OrderRepository orderRepository;
+	private static final Pattern GREETINGS_PATTERN = Pattern.compile("^(hi|hello|start|menu)$");
+	private static final Pattern NUMERIC_INPUT_PATTERN = Pattern.compile("^\\s*\\d+\\s*$");
 
-    @Value("${webhook.verify-token}")
-    private String verifyToken;
+	// WhatsApp API Limit for List Row Titles
+	private static final int MAX_ROW_TITLE_LENGTH = 24;
 
-    // In-memory session management
-    private final Map<String, Map<String, Object>> userSessions = new ConcurrentHashMap<>();
+	private final CustomerService customerService;
+	private final MenuService menuService;
+	private final CartService cartService;
+	private final OrderService orderService;
+	private final WhatsappApiService whatsappApiService;
+	private final CustomerStateService customerStateService;
+	private final PaymentService paymentService;
 
-    /**
-     * Handles Meta's webhook verification request.
-     */
-    @GetMapping
-    public ResponseEntity<String> verifyWebhook(
-            @RequestParam("hub.mode") String mode,
-            @RequestParam("hub.challenge") String challenge,
-            @RequestParam("hub.verify_token") String token) {
-        
-        if ("subscribe".equals(mode) && verifyToken.equals(token)) {
-            System.out.println("Webhook verified successfully!");
-            return ResponseEntity.ok(challenge);
-        } else {
-            System.err.println("Webhook verification failed.");
-            return ResponseEntity.status(403).build();
-        }
-    }
+	public WebhookController(CustomerService customerService, MenuService menuService, CartService cartService,
+			OrderService orderService, WhatsappApiService whatsappApiService, CustomerStateService customerStateService,
+			PaymentService paymentService) {
+		this.customerService = customerService;
+		this.menuService = menuService;
+		this.cartService = cartService;
+		this.orderService = orderService;
+		this.whatsappApiService = whatsappApiService;
+		this.customerStateService = customerStateService;
+		this.paymentService = paymentService;
+	}
 
-    /**
-     * Handles incoming WhatsApp messages from Meta.
-     */
-    @PostMapping
-    public ResponseEntity<Void> handleWhatsAppMessage(@RequestBody WebhookRequest body) {
-        System.out.println("Received webhook: " + body);
+	// -------------------------------------------------------------------------
+	// WEBHOOK VERIFICATION
+	// -------------------------------------------------------------------------
+	@GetMapping
+	public ResponseEntity<String> verifyWebhook(@RequestParam("hub.mode") String mode,
+			@RequestParam("hub.challenge") String challenge, @RequestParam("hub.verify_token") String token) {
+		final String VERIFY_TOKEN = "MY_TEST_TOKEN";
+		if ("subscribe".equals(mode) && VERIFY_TOKEN.equals(token)) {
+			return new ResponseEntity<>(challenge, HttpStatus.OK);
+		}
+		return new ResponseEntity<>("Verification token mismatch", HttpStatus.FORBIDDEN);
+	}
 
-        // Extract message details safely
-        Optional<WebhookRequest.Message> messageOpt = Optional.ofNullable(body)
-                .map(WebhookRequest::getEntry).filter(e -> !e.isEmpty()).map(e -> e.get(0))
-                .map(WebhookRequest.Entry::getChanges).filter(c -> !c.isEmpty()).map(c -> c.get(0))
-                .map(WebhookRequest.Change::getValue)
-                .map(WebhookRequest.Value::getMessages).filter(m -> !m.isEmpty()).map(m -> m.get(0));
+	// -------------------------------------------------------------------------
+	// MESSAGE HANDLER ENTRY
+	// -------------------------------------------------------------------------
+	@PostMapping
+	public ResponseEntity<String> handleIncomingMessage(@RequestBody Map<String, Object> payload) {
 
-        if (messageOpt.isEmpty() || messageOpt.get().getText() == null) {
-            System.out.println("Not a user text message; ignoring.");
-            return ResponseEntity.ok().build();
-        }
-        
-        WebhookRequest.Message message = messageOpt.get();
-        String from = message.getFrom();
-        String incomingMsg = message.getText().getBody().toLowerCase().trim();
+		if (payload == null || payload.get("entry") == null) {
+			return new ResponseEntity<>("Not a valid webhook notification", HttpStatus.OK);
+		}
 
-        // Get or create session
-        Map<String, Object> session = userSessions.computeIfAbsent(from, k -> new ConcurrentHashMap<>());
-        String state = (String) session.getOrDefault("state", "start");
-        
-        String responseMessage;
+		Map<String, Object> messageData = extractMessageData(payload);
+		if (messageData == null) {
+			return new ResponseEntity<>("Notification processed", HttpStatus.OK);
+		}
 
-        // --- Same state machine logic as before ---
-        switch (state) {
-            case "start":
-                responseMessage = "Hi there! Welcome to \"The Burger Joint\" 🍔\n\nWhat would you like to order today?\n\n1. Classic Burger\n2. Cheese Deluxe\n3. Veggie Burger\n\nPlease reply with the number of your choice.";
-                session.put("state", "ordering_item");
-                break;
+		String whatsappNumber = (String) messageData.get("from");
+		String messageType = (String) messageData.get("type");
+		String textBody = "text".equals(messageType) ? ((String) messageData.get("text")).toLowerCase().trim() : "";
 
-            case "ordering_item":
-                Map<String, String> menu = Map.of("1", "Classic Burger", "2", "Cheese Deluxe", "3", "Veggie Burger");
-                String choice = menu.get(incomingMsg);
-                if (choice != null) {
-                    session.put("item", choice);
-                    responseMessage = "Great choice! How many \"" + choice + "\" would you like?";
-                    session.put("state", "ordering_quantity");
-                } else {
-                    responseMessage = "Sorry, I didn't understand that. Please reply with a valid menu number (1, 2, or 3).";
-                }
-                break;
+		Customer customer = customerService.findOrCreateCustomer(whatsappNumber);
+		String currentState = customerStateService.getState(customer.getId());
 
-            case "ordering_quantity":
-                try {
-                    int quantity = Integer.parseInt(incomingMsg);
-                    if (quantity > 0) {
-                        session.put("quantity", quantity);
-                        responseMessage = "Got it. We'll get " + quantity + " of " + session.get("item") + " ready for you.\n\nWhat's the delivery address?";
-                        session.put("state", "ordering_address");
-                    } else {
-                        responseMessage = "Please enter a valid number for the quantity.";
-                    }
-                } catch (NumberFormatException e) {
-                    responseMessage = "That doesn't look like a valid number. Please try again.";
-                }
-                break;
-            
-            case "ordering_address":
-                session.put("address", message.getText().getBody()); // Use original casing for address
-                responseMessage = "Thanks! Let's confirm your order:\n\n*Item:* " + session.get("item") + "\n*Quantity:* " + session.get("quantity") + "\n*Address:* " + session.get("address") + "\n\nIs this correct? (Reply \"yes\" to confirm or \"no\" to start over)";
-                session.put("state", "confirming_order");
-                break;
+		// 1. Handle Global Cancel/Back via Text
+		if ("cancel".equals(textBody) || "back".equals(textBody)) {
+			customerStateService.clearState(customer.getId());
+			whatsappApiService.sendTextMessage(whatsappNumber,
+					"✅ Action cancelled. Type 'menu' or 'cart' to continue.");
+			return new ResponseEntity<>("Cancelled", HttpStatus.OK);
+		}
 
-            case "confirming_order":
-                 if ("yes".equals(incomingMsg)) {
-                    Order newOrder = new Order(
-                        from,
-                        (String) session.get("item"),
-                        (int) session.get("quantity"),
-                        (String) session.get("address")
-                    );
-                    orderRepository.save(newOrder);
+		// 2. Handle Interactive Replies (Buttons/Lists)
+		if ("interactive".equals(messageType)) {
+			handleInteractiveReply(whatsappNumber, customer, messageData);
+			return new ResponseEntity<>("Interactive reply processed", HttpStatus.OK);
+		}
 
-                    responseMessage = "Thank you for your order! We will notify you when it is on its way. 🛵";
-                    userSessions.remove(from); // Clear session
-                } else if ("no".equals(incomingMsg)) {
-                    responseMessage = "Okay, let's start over.\n\nWhat would you like to order today?\n\n1. Classic Burger\n2. Cheese Deluxe\n3. Veggie Burger";
-                    session.put("state", "start");
-                } else {
-                    responseMessage = "Please reply with \"yes\" or \"no\".";
-                }
-                break;
+		// 3. Handle Location
+		if ("location".equals(messageType)) {
+			handleLocationMessage(whatsappNumber, customer, messageData);
+			return new ResponseEntity<>("Location processed", HttpStatus.OK);
+		}
 
-            default:
-                responseMessage = "Oops! Something went wrong. Let's start over. What would you like to order?";
-                session.put("state", "start");
-                break;
-        }
+		// 4. Handle State-Based Inputs (Quantities)
+		if ("AWAITING_QUANTITY_INPUT".equals(currentState) && NUMERIC_INPUT_PATTERN.matcher(textBody).matches()) {
+			handleCustomQuantityInput(whatsappNumber, customer, textBody);
+			return new ResponseEntity<>("Custom quantity processed", HttpStatus.OK);
+		}
 
-        // Send the reply message using the new service
-        whatsAppService.sendMessage(from, responseMessage).subscribe();
+		if (currentState != null && currentState.startsWith("CHANGING_QTY_FOR_")
+				&& NUMERIC_INPUT_PATTERN.matcher(textBody).matches()) {
+			String menuIdStr = currentState.replace("CHANGING_QTY_FOR_", "");
+			handleUpdateCartItemQuantity(whatsappNumber, customer, menuIdStr, textBody);
+			return new ResponseEntity<>("Update quantity processed", HttpStatus.OK);
+		}
 
-        // Acknowledge receipt of the webhook immediately
-        return ResponseEntity.ok().build();
-    }
+		// 5. Handle Standard Text Commands
+		Matcher greetingMatcher = GREETINGS_PATTERN.matcher(textBody);
+
+		if (greetingMatcher.matches()) {
+			sendMainMenu(whatsappNumber);
+			customerStateService.clearState(customer.getId());
+		} else if (textBody.equals("location")) {
+			whatsappApiService.sendTextMessage(whatsappNumber,
+					"Please share your current location pin so we can find nearby franchises.");
+			customerStateService.clearState(customer.getId());
+		} else if (textBody.equals("cart")) {
+			handleViewCart(whatsappNumber, customer);
+			customerStateService.clearState(customer.getId());
+		} else if (textBody.equals("checkout")) {
+			handleCheckout(whatsappNumber, customer);
+			customerStateService.clearState(customer.getId());
+		} else if (textBody.matches("^\\d+$")) {
+			handleTextNumberSelection(whatsappNumber, customer, textBody);
+		} else {
+			customerStateService.clearState(customer.getId());
+			whatsappApiService.sendTextMessage(whatsappNumber,
+					"I didn't catch that. Type 'menu' to see options or 'cart' to view your order.");
+		}
+
+		return new ResponseEntity<>("Message processed", HttpStatus.OK);
+	}
+
+	private void sendMainMenu(String whatsappNumber) {
+		List<Map<String, String>> buttons = new ArrayList<>();
+		buttons.add(Map.of("id", "CMD_REQ_LOC", "title", "📍 Share Location"));
+		buttons.add(Map.of("id", "VIEW_ALL_FRANCHISES", "title", "🌍 View All Stores"));
+
+		whatsappApiService.sendButtonMessage(whatsappNumber,
+				"Welcome to EasyFind Ordering! 🍕🍔\n\nTo find the closest store, please share your location or view all available franchises.",
+				buttons);
+	}
+
+	@SuppressWarnings("unchecked")
+	private void handleLocationMessage(String whatsappNumber, Customer customer, Map<String, Object> messageData) {
+		Map<String, Object> location = (Map<String, Object>) messageData.get("location");
+		if (location == null)
+			return;
+
+		Double latitude = (Double) location.get("latitude");
+		Double longitude = (Double) location.get("longitude");
+		String address = (String) location.get("address");
+
+		customerService.clearCustomerActiveFranchise(customer);
+		customerService.updateCustomerDeliveryDetails(customer, address != null ? address : "Location Pin Shared",
+				latitude, longitude);
+
+		List<Franchise> nearby = menuService.findNearbyFranchises(latitude, longitude);
+		nearby.sort(Comparator.comparing(Franchise::getId));
+
+		List<Map<String, String>> rows = new ArrayList<>();
+
+		for (Franchise f : nearby) {
+			Map<String, String> row = new HashMap<>();
+			row.put("id", "FRANCHISE_" + f.getId());
+			// Truncation Logic
+			String title = f.getName().length() > MAX_ROW_TITLE_LENGTH
+					? f.getName().substring(0, MAX_ROW_TITLE_LENGTH - 3) + "..."
+					: f.getName();
+			row.put("title", title);
+			row.put("description", (f.isCurrentlyOpen() ? "OPEN" : "CLOSED") + " | " + f.getServiceType());
+			rows.add(row);
+		}
+
+		List<Map<String, Object>> sections = new ArrayList<>();
+
+		if (!rows.isEmpty()) {
+			Map<String, Object> nearbySection = new HashMap<>();
+			nearbySection.put("title", "Nearby Stores");
+			nearbySection.put("rows", rows);
+			sections.add(nearbySection);
+		}
+
+		List<Map<String, String>> otherRows = new ArrayList<>();
+		otherRows.add(Map.of("id", "VIEW_ALL_FRANCHISES", "title", "🌍 View All Stores", "description",
+				"See stores outside range"));
+
+		Map<String, Object> otherSection = new HashMap<>();
+		otherSection.put("title", "Other Options");
+		otherSection.put("rows", otherRows);
+		sections.add(otherSection);
+
+		String header = rows.isEmpty() ? "No Nearby Stores Found" : "Nearby Franchises";
+		String body = rows.isEmpty() ? "We couldn't find a store in your immediate area. You can view all stores below."
+				: "Select a franchise to view its menu.";
+
+		whatsappApiService.sendListMessage(whatsappNumber, header, body, "Select Store", sections);
+	}
+
+	private void handleShowAllFranchises(String whatsappNumber) {
+		List<Franchise> all = menuService.findAllFranchises();
+		all.sort(Comparator.comparing(Franchise::getName));
+
+		List<Map<String, String>> rows = new ArrayList<>();
+		for (Franchise f : all) {
+			Map<String, String> row = new HashMap<>();
+			row.put("id", "FRANCHISE_" + f.getId());
+			// Truncation Logic
+			String title = f.getName().length() > MAX_ROW_TITLE_LENGTH
+					? f.getName().substring(0, MAX_ROW_TITLE_LENGTH - 3) + "..."
+					: f.getName();
+			row.put("title", title);
+			row.put("description", f.getCity() + " | " + (f.isCurrentlyOpen() ? "OPEN" : "CLOSED"));
+			rows.add(row);
+		}
+
+		Map<String, Object> section = new HashMap<>();
+		section.put("title", "All Franchises");
+		section.put("rows", rows);
+
+		whatsappApiService.sendListMessage(whatsappNumber, "All Stores", "Select any franchise from the list below.",
+				"Select Store", List.of(section));
+	}
+
+	@SuppressWarnings("unchecked")
+	private void handleInteractiveReply(String whatsappNumber, Customer customer, Map<String, Object> messageData) {
+		try {
+			Map<String, Object> interactive = (Map<String, Object>) messageData.get("interactive");
+			String replyId = null;
+
+			if (interactive.containsKey("list_reply")) {
+				replyId = (String) ((Map<String, Object>) interactive.get("list_reply")).get("id");
+			} else if (interactive.containsKey("button_reply")) {
+				replyId = (String) ((Map<String, Object>) interactive.get("button_reply")).get("id");
+			}
+
+			if (replyId == null)
+				return;
+
+			// --- ROUTING LOGIC ---
+			if (replyId.equals("CMD_REQ_LOC")) {
+				whatsappApiService.sendTextMessage(whatsappNumber,
+						"Please tap the 📎 (Paperclip) or + icon and select 'Location' to share your pin.");
+			} else if (replyId.equals("VIEW_ALL_FRANCHISES")) {
+				handleShowAllFranchises(whatsappNumber);
+			} else if (replyId.startsWith("FRANCHISE_")) {
+				handleFranchiseIdSelection(whatsappNumber, customer, replyId.replace("FRANCHISE_", ""));
+				customerStateService.clearState(customer.getId());
+			} else if (replyId.equals("BACK_TO_FRANCHISE_SELECTION")) {
+				if (customer.getLatitude() != null)
+					handleLocationMessage(whatsappNumber, customer, Map.of("location", Map.of("latitude",
+							customer.getLatitude(), "longitude", customer.getLongitude(), "address", "")));
+				else
+					sendMainMenu(whatsappNumber);
+			} else if (replyId.startsWith("CATEGORY_")) {
+				handleCategoryIdSelectionInteractive(whatsappNumber, customer, replyId.replace("CATEGORY_", ""));
+				customerStateService.clearState(customer.getId());
+			} else if (replyId.startsWith("PRODUCT_")) {
+				handleProductIdSelection(whatsappNumber, customer, replyId.replace("PRODUCT_", ""));
+			} else if (replyId.startsWith("QTY_")) {
+				handleAddQuantitySelection(whatsappNumber, customer, replyId.replace("QTY_", ""));
+			} else if (replyId.equals("CUSTOM_QTY_INPUT")) {
+				handleCustomQuantityButton(whatsappNumber, customer);
+			} else if (replyId.equals("BUTTON_ADD_MORE")) {
+				handleBackToCategories(whatsappNumber, customer);
+			} else if (replyId.equals("BUTTON_VIEW_CART") || replyId.equals("BACK_TO_CART")) {
+				handleViewCart(whatsappNumber, customer);
+				customerStateService.clearState(customer.getId());
+			} else if (replyId.equals("BUTTON_CHECKOUT")) {
+				handleCheckout(whatsappNumber, customer);
+			} else if (replyId.equals("BUTTON_MODIFY_CART")) {
+				handleModifyCartRequest(whatsappNumber, customer);
+			} else if (replyId.startsWith("MOD_ITEM_")) {
+				handleCartItemActionMenu(whatsappNumber, customer, replyId.replace("MOD_ITEM_", ""));
+			} else if (replyId.startsWith("RM_ONE_")) {
+				handleCartActionExecution(whatsappNumber, customer, replyId.replace("RM_ONE_", ""), "REMOVE_ONE");
+			} else if (replyId.startsWith("RM_ALL_")) {
+				handleCartActionExecution(whatsappNumber, customer, replyId.replace("RM_ALL_", ""), "REMOVE_ALL");
+			} else if (replyId.startsWith("CHG_QTY_")) {
+				handleCartChangeQtyPrompt(whatsappNumber, customer, replyId.replace("CHG_QTY_", ""));
+			} else {
+				customerStateService.clearState(customer.getId());
+			}
+
+		} catch (Exception e) {
+			whatsappApiService.sendTextMessage(whatsappNumber, "Error processing selection: " + e.getMessage());
+			customerStateService.clearState(customer.getId());
+		}
+	}
+
+	private void handleViewCart(String whatsappNumber, Customer customer) {
+		if (customer.getActiveFranchiseId() == null) {
+			whatsappApiService.sendTextMessage(whatsappNumber, "Please select a franchise first.");
+			return;
+		}
+
+		Optional<Franchise> franchiseOpt = menuService.getFranchiseById(customer.getActiveFranchiseId());
+		if (franchiseOpt.isEmpty()) {
+			whatsappApiService.sendTextMessage(whatsappNumber, "Invalid franchise.");
+			return;
+		}
+
+		Cart cart = cartService.getOrCreateCart(customer, franchiseOpt.get());
+		String cartSummaryText = cartService.formatCartForWhatsapp(cart);
+
+		if (cart.getItems().isEmpty()) {
+			whatsappApiService.sendTextMessage(whatsappNumber, cartSummaryText + "\nType 'menu' to start ordering.");
+			return;
+		}
+
+		List<Map<String, String>> buttons = new ArrayList<>();
+		buttons.add(Map.of("id", "BUTTON_CHECKOUT", "title", "✅ Checkout / Pay"));
+		buttons.add(Map.of("id", "BUTTON_ADD_MORE", "title", "➕ Add Items"));
+		buttons.add(Map.of("id", "BUTTON_MODIFY_CART", "title", "✏️ Modify / Remove"));
+
+		whatsappApiService.sendButtonMessage(whatsappNumber, cartSummaryText, buttons);
+	}
+
+	// -------------------------------------------------------------------------
+	// FIXED: MODIFY CART REQUEST (Added Truncation)
+	// -------------------------------------------------------------------------
+	private void handleModifyCartRequest(String whatsappNumber, Customer customer) {
+		Optional<Franchise> franchiseOpt = menuService.getFranchiseById(customer.getActiveFranchiseId());
+		Cart cart = cartService.getOrCreateCart(customer, franchiseOpt.get());
+
+		if (cart.getItems().isEmpty()) {
+			handleViewCart(whatsappNumber, customer);
+			return;
+		}
+
+		List<Map<String, String>> rows = new ArrayList<>();
+		for (CartItem item : cart.getItems()) {
+			Map<String, String> row = new HashMap<>();
+			row.put("id", "MOD_ITEM_" + item.getMenu().getId());
+
+			// --- TRUNCATION FIX ---
+			String title = item.getMenu().getName();
+			if (title.length() > MAX_ROW_TITLE_LENGTH) {
+				// Ensure we leave room for "..."
+				title = title.substring(0, MAX_ROW_TITLE_LENGTH - 3) + "...";
+			}
+			row.put("title", title);
+			// ----------------------
+
+			row.put("description", "Qty: " + item.getQuantity() + " | R" + item.getMenu().getPrice());
+			rows.add(row);
+		}
+
+		Map<String, String> backRow = new HashMap<>();
+		backRow.put("id", "BACK_TO_CART");
+		backRow.put("title", "🔙 Back to Cart");
+		backRow.put("description", "Cancel modification");
+		rows.add(0, backRow);
+
+		Map<String, Object> section = new HashMap<>();
+		section.put("title", "Select Item to Modify");
+		section.put("rows", rows);
+
+		whatsappApiService.sendListMessage(whatsappNumber, "Modify Cart",
+				"Select an item to remove or change quantity.", "Select Item", List.of(section));
+	}
+
+	private void handleCartItemActionMenu(String whatsappNumber, Customer customer, String menuIdStr) {
+		Long menuId = Long.parseLong(menuIdStr);
+		Optional<Menu> menuOpt = menuService.getProductById(menuId);
+		if (menuOpt.isEmpty()) {
+			handleViewCart(whatsappNumber, customer);
+			return;
+		}
+		String itemName = menuOpt.get().getName();
+
+		List<Map<String, String>> buttons = new ArrayList<>();
+		buttons.add(Map.of("id", "RM_ONE_" + menuId, "title", "➖ Remove 1"));
+		buttons.add(Map.of("id", "RM_ALL_" + menuId, "title", "❌ Remove All"));
+		buttons.add(Map.of("id", "CHG_QTY_" + menuId, "title", "🔢 Change Quantity"));
+
+		whatsappApiService.sendButtonMessage(whatsappNumber, "Modify: *" + itemName + "*\nChoose an action:", buttons);
+	}
+
+	private void handleCartActionExecution(String whatsappNumber, Customer customer, String menuIdStr, String action) {
+		Long menuId = Long.parseLong(menuIdStr);
+		Optional<Franchise> franchiseOpt = menuService.getFranchiseById(customer.getActiveFranchiseId());
+
+		if (action.equals("REMOVE_ONE")) {
+			cartService.removeItemFromCart(customer, franchiseOpt.get(), menuId, 1);
+			whatsappApiService.sendTextMessage(whatsappNumber, "✅ Removed 1 item.");
+		} else if (action.equals("REMOVE_ALL")) {
+			cartService.removeItemFromCart(customer, franchiseOpt.get(), menuId, 9999);
+			whatsappApiService.sendTextMessage(whatsappNumber, "✅ Item removed from cart.");
+		}
+
+		handleViewCart(whatsappNumber, customer);
+	}
+
+	private void handleCartChangeQtyPrompt(String whatsappNumber, Customer customer, String menuIdStr) {
+		customerStateService.setState(customer.getId(), "CHANGING_QTY_FOR_" + menuIdStr);
+		whatsappApiService.sendTextMessage(whatsappNumber,
+				"Please type the *new total quantity* you want for this item (e.g. '5').\n\nType 'back' to cancel.");
+	}
+
+	private void handleUpdateCartItemQuantity(String whatsappNumber, Customer customer, String menuIdStr,
+			String rawQuantity) {
+		try {
+			Long menuId = Long.parseLong(menuIdStr);
+			Integer newQty = Integer.parseInt(rawQuantity.trim());
+
+			if (newQty <= 0) {
+				whatsappApiService.sendTextMessage(whatsappNumber,
+						"Quantity must be greater than 0. Use 'Remove All' to delete.");
+				return;
+			}
+
+			Optional<Franchise> franchiseOpt = menuService.getFranchiseById(customer.getActiveFranchiseId());
+			cartService.removeItemFromCart(customer, franchiseOpt.get(), menuId, 9999);
+			cartService.addOrUpdateItem(customer, menuId, newQty);
+
+			customerStateService.clearState(customer.getId());
+			whatsappApiService.sendTextMessage(whatsappNumber, "✅ Quantity updated to " + newQty);
+			handleViewCart(whatsappNumber, customer);
+
+		} catch (Exception e) {
+			whatsappApiService.sendTextMessage(whatsappNumber, "Invalid quantity.");
+		}
+	}
+
+	private void handleCheckout(String whatsappNumber, Customer customer) {
+		Optional<Franchise> franchiseOpt = menuService.getFranchiseById(customer.getActiveFranchiseId());
+		if (franchiseOpt.isEmpty()) {
+			whatsappApiService.sendTextMessage(whatsappNumber, "Please select a franchise first.");
+			return;
+		}
+
+		Cart cart = cartService.getOrCreateCart(customer, franchiseOpt.get());
+
+		if (cart == null || cart.getItems().isEmpty()) {
+			whatsappApiService.sendTextMessage(whatsappNumber,
+					"Your cart is empty! Please add items before checking out.");
+			return;
+		}
+
+		Order newOrder = orderService.createOrderFromCart(customer, cart);
+
+		// Call Ozow Payment Service
+		String paymentLink = paymentService.generatePaymentLink(newOrder);
+
+		String checkoutMessage = String.format(
+				"✅ *Order #%s Created!* \nTotal: *R%.2f*.\n\nTo complete your order, please click the secure payment link below.",
+				newOrder.getId(), newOrder.getFinalCustomerAmount());
+
+		whatsappApiService.sendTextMessage(whatsappNumber, checkoutMessage);
+		whatsappApiService.sendTextMessage(whatsappNumber, paymentLink);
+
+		customerStateService.clearState(customer.getId());
+	}
+
+	// -------------------------------------------------------------------------
+	// EXISTING HELPER METHODS
+	// -------------------------------------------------------------------------
+
+	@SuppressWarnings("unchecked")
+	private Map<String, Object> extractMessageData(Map<String, Object> payload) {
+		try {
+			List<Map<String, Object>> entries = (List<Map<String, Object>>) payload.get("entry");
+			if (entries == null || entries.isEmpty())
+				return null;
+			Map<String, Object> entry = entries.get(0);
+			List<Map<String, Object>> changes = (List<Map<String, Object>>) entry.get("changes");
+			if (changes == null || changes.isEmpty())
+				return null;
+			Map<String, Object> value = (Map<String, Object>) changes.get(0).get("value");
+			List<Map<String, Object>> messages = (List<Map<String, Object>>) value.get("messages");
+			if (messages == null || messages.isEmpty())
+				return null;
+			Map<String, Object> message = messages.get(0);
+			Map<String, Object> data = new HashMap<>();
+			data.put("from", message.get("from"));
+			String type = (String) message.get("type");
+			data.put("type", type);
+			if ("text".equals(type))
+				data.put("text", ((Map<String, Object>) message.get("text")).get("body"));
+			else if ("location".equals(type))
+				data.put("location", message.get("location"));
+			else if ("interactive".equals(type))
+				data.put("interactive", message.get("interactive"));
+			return data;
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// FIXED: CATEGORY SELECTION (Implemented Truncation Here)
+	// -------------------------------------------------------------------------
+	private void handleCategoryIdSelectionInteractive(String whatsappNumber, Customer customer, String categoryIdStr) {
+		try {
+			Long categoryId = Long.parseLong(categoryIdStr);
+			Long franchiseId = customer.getActiveFranchiseId();
+			List<Menu> menuItems = menuService.getMenuItemsByFranchiseAndCategory(franchiseId, categoryId);
+			Optional<Category> categoryOpt = menuService.getCategoryById(categoryId);
+
+			if (menuItems.isEmpty() || categoryOpt.isEmpty()) {
+				whatsappApiService.sendTextMessage(whatsappNumber, "No items found.");
+				return;
+			}
+
+			// --- LOGIC MOVED HERE TO FIX TRUNCATION ---
+			List<Map<String, String>> rows = new ArrayList<>();
+			for (Menu item : menuItems) {
+				Map<String, String> row = new HashMap<>();
+				row.put("id", "PRODUCT_" + item.getId());
+
+				// FIX: Truncate title to 24 chars to prevent crash
+				String title = item.getName();
+				if (title.length() > MAX_ROW_TITLE_LENGTH) {
+					title = title.substring(0, MAX_ROW_TITLE_LENGTH - 3) + "...";
+				}
+
+				row.put("title", title);
+				row.put("description",
+						"R" + item.getPrice() + " | " + (item.getDescription() != null ? item.getDescription() : ""));
+				rows.add(row);
+			}
+
+			Map<String, Object> section = new HashMap<>();
+			section.put("title", categoryOpt.get().getName());
+			section.put("rows", rows);
+
+			whatsappApiService.sendListMessage(whatsappNumber, categoryOpt.get().getName(),
+					"Select an item to add to your cart.", "Select Item", List.of(section));
+			// -------------------------------------------
+
+		} catch (NumberFormatException e) {
+			whatsappApiService.sendTextMessage(whatsappNumber, "Error loading category.");
+		}
+	}
+
+	private void handleProductIdSelection(String whatsappNumber, Customer customer, String menuIdStr) {
+		Long menuId = Long.parseLong(menuIdStr);
+		Optional<Menu> menuOpt = menuService.getProductById(menuId);
+		if (menuOpt.isEmpty())
+			return;
+		Menu selectedMenu = menuOpt.get();
+		customerStateService.setState(customer.getId(), "PRODUCT_SELECTED");
+		customerStateService.setLastSelectedId(customer.getId(), menuId);
+		String bodyText = String.format("You selected *%s* (R%.2f).\n\nHow many would you like to add?",
+				selectedMenu.getName(), selectedMenu.getPrice());
+		List<Map<String, String>> buttons = new ArrayList<>();
+		buttons.add(Map.of("id", "QTY_1", "title", "1 item"));
+		buttons.add(Map.of("id", "QTY_2", "title", "2 items"));
+		buttons.add(Map.of("id", "CUSTOM_QTY_INPUT", "title", "Custom Amount"));
+		whatsappApiService.sendButtonMessage(whatsappNumber, bodyText, buttons);
+	}
+
+	private void handleCustomQuantityButton(String whatsappNumber, Customer customer) {
+		if (customerStateService.getLastSelectedId(customer.getId()) == null) {
+			whatsappApiService.sendTextMessage(whatsappNumber, "Please select an item first.");
+			return;
+		}
+		whatsappApiService.sendTextMessage(whatsappNumber, "Please *type* the quantity (e.g., 5).");
+		customerStateService.setState(customer.getId(), "AWAITING_QUANTITY_INPUT");
+	}
+
+	private void handleCustomQuantityInput(String whatsappNumber, Customer customer, String rawQuantity) {
+		Long menuId = customerStateService.getLastSelectedId(customer.getId());
+		if (menuId == null) {
+			customerStateService.clearState(customer.getId());
+			return;
+		}
+		try {
+			Integer quantity = Integer.parseInt(rawQuantity.trim());
+			if (quantity <= 0)
+				return;
+			String message = cartService.addOrUpdateItem(customer, menuId, quantity);
+			customerStateService.clearState(customer.getId());
+			whatsappApiService.sendPostAddToCartOptions(whatsappNumber, message);
+		} catch (Exception e) {
+		}
+	}
+
+	private void handleAddQuantitySelection(String whatsappNumber, Customer customer, String quantityStr) {
+		Long menuId = customerStateService.getLastSelectedId(customer.getId());
+		Integer quantity = Integer.parseInt(quantityStr);
+		if (menuId == null)
+			return;
+		String message = cartService.addOrUpdateItem(customer, menuId, quantity);
+		customerStateService.clearState(customer.getId());
+		whatsappApiService.sendPostAddToCartOptions(whatsappNumber, message);
+	}
+
+	private void handleTextNumberSelection(String whatsappNumber, Customer customer, String selection) {
+		try {
+			if (customer.getActiveFranchiseId() == null)
+				handleFranchiseIdSelection(whatsappNumber, customer, selection);
+			else
+				handleCategoryIdSelectionInteractive(whatsappNumber, customer, selection);
+		} catch (Exception e) {
+		}
+	}
+
+	private void handleFranchiseIdSelection(String whatsappNumber, Customer customer, String selection) {
+		try {
+			Long franchiseId = Long.parseLong(selection);
+			Optional<Franchise> franchiseOpt = menuService.getFranchiseById(franchiseId);
+			if (franchiseOpt.isEmpty()) {
+				whatsappApiService.sendTextMessage(whatsappNumber, "Invalid selection.");
+				return;
+			}
+			customerService.setCustomerActiveFranchise(customer, franchiseId);
+			List<Map<String, String>> categoryRows = menuService.formatCategoriesForListMessage(franchiseId);
+			Map<String, String> back = new HashMap<>();
+			back.put("id", "BACK_TO_FRANCHISE_SELECTION");
+			back.put("title", "⬅️ Back/Change Store");
+			categoryRows.add(0, back);
+			Map<String, Object> section = new HashMap<>();
+			section.put("title", "Categories");
+			section.put("rows", categoryRows);
+			whatsappApiService.sendListMessage(whatsappNumber, franchiseOpt.get().getName() + " Menu",
+					"Select a category.", "Choose", List.of(section));
+		} catch (Exception e) {
+		}
+	}
+
+	private void handleBackToCategories(String whatsappNumber, Customer customer) {
+		Long franchiseId = customer.getActiveFranchiseId();
+		if (franchiseId == null)
+			return;
+		handleFranchiseIdSelection(whatsappNumber, customer, franchiseId.toString());
+	}
 }
