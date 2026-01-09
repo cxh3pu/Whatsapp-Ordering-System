@@ -1,0 +1,235 @@
+package com.easyfind.whatsapp.ordering_system.service;
+
+import com.easyfind.whatsapp.ordering_system.entity.Category;
+import com.easyfind.whatsapp.ordering_system.entity.Franchise;
+import com.easyfind.whatsapp.ordering_system.entity.Menu;
+import com.easyfind.whatsapp.ordering_system.repository.CategoryRepository;
+import com.easyfind.whatsapp.ordering_system.repository.FranchiseRepository;
+import com.easyfind.whatsapp.ordering_system.repository.MenuRepository;
+
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+@Service
+public class MenuService {
+
+	private static final double MAX_DISTANCE_KM = 15.0;
+	// Max chars for WhatsApp List Message Row Title (24)
+	private static final int MAX_ROW_TITLE_LENGTH = 24;
+	// Max chars for WhatsApp List Message Row Description (72)
+	private static final int MAX_ROW_DESC_LENGTH = 72;
+
+	private final MenuRepository menuRepository;
+	private final FranchiseRepository franchiseRepository;
+	private final CategoryRepository categoryRepository;
+
+	public MenuService(MenuRepository menuRepository, FranchiseRepository franchiseRepository,
+			CategoryRepository categoryRepository) {
+		this.menuRepository = menuRepository;
+		this.franchiseRepository = franchiseRepository;
+		this.categoryRepository = categoryRepository;
+	}
+
+	// Franchise Location & Distance Calculation
+
+	public List<Franchise> findNearbyFranchises(Double customerLatitude, Double customerLongitude) {
+		if (customerLatitude == null || customerLongitude == null) {
+			return List.of();
+		}
+		return franchiseRepository.findNearbyFranchises(customerLatitude, customerLongitude, MAX_DISTANCE_KM);
+	}
+
+	// Utility Lookups
+	public List<Category> getCategoriesByFranchise(Long franchiseId) {
+		return categoryRepository.findByFranchiseIdOrderByDisplayOrderAsc(franchiseId);
+	}
+
+	public List<Franchise> findAllFranchises() {
+		return franchiseRepository.findAll().stream().filter(franchise -> franchise != null)
+				.sorted(Comparator.comparing(Franchise::getName)).collect(Collectors.toList());
+	}
+
+	public Optional<Franchise> getFranchiseById(Long franchiseId) {
+		return franchiseRepository.findById(franchiseId);
+	}
+
+	public Optional<Menu> getProductById(Long productId) {
+		return menuRepository.findById(productId);
+	}
+
+	public List<Menu> getMenuByFranchiseId(Long franchiseId) {
+		return menuRepository.findByFranchiseId(franchiseId);
+	}
+
+	public List<Menu> getMenuItemsByFranchise(Franchise franchise) {
+		if (franchise == null || franchise.getId() == null) {
+			return List.of();
+		}
+		List<Category> categories = categoryRepository.findByFranchiseIdOrderByDisplayOrderAsc(franchise.getId());
+		return categories.stream()
+				.flatMap(category -> menuRepository.findByCategoryIdOrderByNameAsc(category.getId()).stream())
+				.collect(Collectors.toList());
+	}
+
+	// Menu Formatting (Text Helpers)
+	public String formatMenuForWhatsapp(Long franchiseId) {
+		Optional<Franchise> franchiseOpt = getFranchiseById(franchiseId);
+		String franchiseName = franchiseOpt.map(Franchise::getName).orElse("Selected Restaurant");
+
+		List<Category> categories = categoryRepository.findByFranchiseIdOrderByDisplayOrderAsc(franchiseId);
+
+		if (categories.isEmpty()) {
+			return "Apologies, the menu is currently unavailable at *" + franchiseName + "*.";
+		}
+
+		StringBuilder menu = new StringBuilder("--- *MENU for " + franchiseName + "* ---\n\n");
+
+		for (Category category : categories) {
+			List<Menu> menus = menuRepository.findByCategoryIdOrderByNameAsc(category.getId());
+
+			if (!menus.isEmpty()) {
+				menu.append("*--- ").append(category.getName()).append(" ---*\n");
+				for (Menu p : menus) {
+					menu.append(String.format("`%d`. %s - R%.2f", p.getId(), p.getName(),
+							p.getPrice() != null ? p.getPrice().doubleValue() : 0.00));
+
+					Optional.ofNullable(p.getDescription()).filter(desc -> !desc.isBlank())
+							.ifPresent(desc -> menu.append("\n _").append(desc.trim()).append("_"));
+					menu.append("\n");
+				}
+				menu.append("\n");
+			}
+		}
+		menu.append("\nType `add [ID] [quantity]` to order. Example: `add 1 2`");
+		menu.append("\nType `cart` to view your order.");
+		return menu.toString();
+	}
+
+	public String formatCategoriesForWhatsapp(Long franchiseId) {
+		List<Category> categories = categoryRepository.findByFranchiseIdOrderByDisplayOrderAsc(franchiseId);
+		if (categories.isEmpty()) {
+			return "Apologies, the menu for this franchise is currently under construction.";
+		}
+		StringBuilder sb = new StringBuilder();
+		sb.append("--- MENU CATEGORIES ---\n\n");
+		sb.append("Please reply with the *Category ID* to view products:\n\n");
+		for (Category category : categories) {
+			sb.append(String.format("`%d`. *%s*", category.getId(), category.getName()));
+			if (category.getDescription() != null && !category.getDescription().trim().isEmpty()) {
+				sb.append(String.format(" - %s", category.getDescription()));
+			}
+			sb.append("\n");
+		}
+		sb.append("\nType `cart` to view your order.");
+		return sb.toString();
+	}
+
+	public String formatProductsByCategoryForWhatsapp(Long franchiseId, Long categoryId) {
+		List<Menu> products = menuRepository.findByFranchiseIdAndCategoryIdOrderByNameAsc(franchiseId, categoryId);
+		if (products.isEmpty()) {
+			return "Apologies, there are no products available in this category.";
+		}
+		String categoryName = categoryRepository.findById(categoryId).map(Category::getName).orElse("Menu Category");
+		StringBuilder sb = new StringBuilder();
+		sb.append(String.format("--- *%s Menu Items* ---\n\n", categoryName.toUpperCase()));
+		sb.append("Reply with `add [ID] [quantity]` to order. Example: `add 101 2`\n\n");
+		for (Menu p : products) {
+			sb.append(String.format("`%d`. *%s* - R%.2f", p.getId(), p.getName(),
+					p.getPrice() != null ? p.getPrice().doubleValue() : 0.00));
+			Optional.ofNullable(p.getDescription()).filter(desc -> !desc.isBlank())
+					.ifPresent(desc -> sb.append("\n _").append(desc.trim()).append("_"));
+			sb.append("\n");
+		}
+		sb.append("\n---\n");
+		sb.append("Type `cart` to view your order.\n");
+		return sb.toString();
+	}
+
+	public void clearCustomerMenuState(Long customerId) {
+	}
+
+	//WhatsApp List Message Formatters (FIXED FOR API LIMITS)
+	/**
+	 * Formats categories into the structure required for a WhatsApp Interactive
+	 * List Message.
+	 */
+	public List<Map<String, String>> formatCategoriesForListMessage(Long franchiseId) {
+		List<Category> categories = getCategoriesByFranchise(franchiseId);
+		List<Map<String, String>> options = new ArrayList<>();
+
+		for (Category cat : categories) {
+			Map<String, String> option = new HashMap<>();
+			option.put("id", "CATEGORY_" + cat.getId());
+
+			// FIX: Truncate Category Title to 24 chars
+			String categoryTitle = cat.getName();
+			if (categoryTitle != null && categoryTitle.length() > MAX_ROW_TITLE_LENGTH) {
+				categoryTitle = categoryTitle.substring(0, MAX_ROW_TITLE_LENGTH - 3) + "...";
+			}
+			option.put("title", categoryTitle != null ? categoryTitle : "Category");
+
+			String description = (cat.getDescription() != null && !cat.getDescription().trim().isEmpty())
+					? cat.getDescription()
+					: "Tap to browse products";
+
+			// Safety Truncate Description (72 chars)
+			if (description.length() > MAX_ROW_DESC_LENGTH) {
+				description = description.substring(0, MAX_ROW_DESC_LENGTH - 3) + "...";
+			}
+			option.put("description", description);
+			options.add(option);
+		}
+		return options;
+	}
+
+	/**
+	 * Formats MenuItems into a List Message structure for a Category. FIXED: Moves
+	 * price to Description to prevent Title overflow.
+	 */
+	public Map<String, Object> formatMenuItemsForListMessage(Category category, List<Menu> menuItems) {
+		List<Map<String, Object>> rows = new ArrayList<>();
+
+		for (Menu item : menuItems) {
+			String rowId = "PRODUCT_" + item.getId();
+
+			//FIX 1: Title contains NAME ONLY (Truncated to 24) ---
+			String title = item.getName();
+			if (title.length() > MAX_ROW_TITLE_LENGTH) {
+				title = title.substring(0, MAX_ROW_TITLE_LENGTH - 3) + "...";
+			}
+
+			//FIX 2: Price moved to Description (Max 72) ---
+			String priceStr = String.format("R%.2f", item.getPrice());
+			String rawDesc = item.getDescription() != null ? item.getDescription() : "";
+
+			// Description Format: "R120.00 | Delicious cheese pizza..."
+			String description = priceStr + " | " + rawDesc;
+
+			if (description.length() > MAX_ROW_DESC_LENGTH) {
+				description = description.substring(0, MAX_ROW_DESC_LENGTH - 3) + "...";
+			}
+
+			rows.add(Map.of("id", rowId, "title", title, "description", description));
+		}
+
+		Map<String, Object> section = Map.of("title", "Menu Items", "rows", rows);
+
+		return Map.of("header", category.getName(), "body", "Select an item to add it to your cart:", "footer",
+				"EasyFind Ordering", "buttonText", "Select Item", "sections", List.of(section));
+	}
+
+	public List<Menu> getMenuItemsByFranchiseAndCategory(Long franchiseId, Long categoryId) {
+		return menuRepository.findByFranchiseIdAndCategoryIdOrderByNameAsc(franchiseId, categoryId);
+	}
+
+	public Optional<Category> getCategoryById(Long categoryId) {
+		return categoryRepository.findById(categoryId);
+	}
+}
