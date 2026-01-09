@@ -1,0 +1,226 @@
+package com.easyfind.whatsapp.ordering_system.service;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@Service
+public class WhatsappApiService {
+
+    @Value("${whatsapp.api.access-token}")
+    private String ACCESS_TOKEN;
+
+    @Value("${whatsapp.api.url}")
+    private String API_URL;
+
+    // --- Template Names ---
+    private static final String WELCOME_MESSAGE_TEMPLATE = "welcome_message";
+    private static final String ADDRESS_REQUEST_TEMPLATE = "address_request";
+
+    private static final String LANGUAGE_CODE = "en_US";
+
+    private final RestTemplate restTemplate;
+
+    public WhatsappApiService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
+
+    // -------------------------------------------------------------------------
+    // --- CORE SEND METHOD ---
+    // -------------------------------------------------------------------------
+    private void sendRequest(Map<String, Object> requestBody, String toWhatsappNumber) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(ACCESS_TOKEN);
+
+        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
+
+        try {
+            restTemplate.postForEntity(API_URL, entity, String.class);
+            System.out.println("Successfully sent message to " + toWhatsappNumber);
+        } catch (HttpClientErrorException e) {
+            System.err.println("API Client Error when sending message to " + toWhatsappNumber + ": " + e.getStatusCode());
+            System.err.println("Response body: " + e.getResponseBodyAsString());
+        } catch (Exception e) {
+            System.err.println("Failed to send WhatsApp message to " + toWhatsappNumber + ". Error: " + e.getMessage());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // --- TEXT MESSAGE ---
+    // -------------------------------------------------------------------------
+    public void sendTextMessage(String toWhatsappNumber, String messageText) {
+        Map<String, Object> textMessageBody = Map.of("body", messageText);
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("messaging_product", "whatsapp");
+        requestBody.put("to", toWhatsappNumber);
+        requestBody.put("type", "text");
+        requestBody.put("text", textMessageBody);
+        sendRequest(requestBody, toWhatsappNumber);
+    }
+
+    // -------------------------------------------------------------------------
+    // --- IMAGE MESSAGE (NEW) ---
+    // -------------------------------------------------------------------------
+    /**
+     * Sends an image from a public URL.
+     * @param toWhatsappNumber The recipient's number.
+     * @param imageUrl The public HTTP/HTTPS URL of the image.
+     * @param caption Optional text caption to appear below the image.
+     */
+    public void sendImageMessage(String toWhatsappNumber, String imageUrl, String caption) {
+        Map<String, String> imageBody = new HashMap<>();
+        imageBody.put("link", imageUrl);
+        if (caption != null && !caption.isEmpty()) {
+            imageBody.put("caption", caption);
+        }
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("messaging_product", "whatsapp");
+        requestBody.put("to", toWhatsappNumber);
+        requestBody.put("type", "image");
+        requestBody.put("image", imageBody);
+
+        sendRequest(requestBody, toWhatsappNumber);
+    }
+
+    // -------------------------------------------------------------------------
+    // --- TEMPLATE MESSAGES ---
+    // -------------------------------------------------------------------------
+    public void sendWelcomeTemplate(String toWhatsappNumber) {
+        sendTemplateMessage(toWhatsappNumber, WELCOME_MESSAGE_TEMPLATE, LANGUAGE_CODE, Collections.emptyList(), Collections.emptyList());
+    }
+
+    public void sendAddressRequestTemplate(String toWhatsappNumber) {
+        sendTemplateMessage(toWhatsappNumber, ADDRESS_REQUEST_TEMPLATE, LANGUAGE_CODE, Collections.emptyList(), Collections.emptyList());
+    }
+
+    public void sendTemplateMessage(String toWhatsappNumber, String templateName, String languageCode, List<String> headerParameters, List<String> bodyParameters) {
+        List<Map<String, Object>> components = new ArrayList<>();
+
+        if (headerParameters != null && !headerParameters.isEmpty()) {
+            List<Map<String, Object>> params = new ArrayList<>();
+            for (String param : headerParameters) {
+                params.add(Map.of("type", "text", "text", param));
+            }
+            Map<String, Object> headerComponent = new HashMap<>();
+            headerComponent.put("type", "header");
+            headerComponent.put("parameters", params);
+            components.add(headerComponent);
+        }
+
+        if (bodyParameters != null && !bodyParameters.isEmpty()) {
+            List<Map<String, Object>> params = new ArrayList<>();
+            for (String param : bodyParameters) {
+                params.add(Map.of("type", "text", "text", param));
+            }
+            Map<String, Object> bodyComponent = Map.of("type", "body", "parameters", params);
+            components.add(bodyComponent);
+        }
+
+        Map<String, Object> templateBody = new HashMap<>();
+        templateBody.put("name", templateName);
+        templateBody.put("language", Map.of("code", languageCode));
+        if (!components.isEmpty()) {
+            templateBody.put("components", components);
+        }
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("messaging_product", "whatsapp");
+        requestBody.put("to", toWhatsappNumber);
+        requestBody.put("type", "template");
+        requestBody.put("template", templateBody);
+
+        sendRequest(requestBody, toWhatsappNumber);
+    }
+
+    // -------------------------------------------------------------------------
+    // --- INTERACTIVE MESSAGE (Generic Helper) ---
+    // -------------------------------------------------------------------------
+    private void sendInteractiveMessage(String toWhatsappNumber, Map<String, Object> interactiveObject) {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("messaging_product", "whatsapp");
+        requestBody.put("to", toWhatsappNumber);
+        requestBody.put("type", "interactive");
+        requestBody.put("interactive", interactiveObject);
+        sendRequest(requestBody, toWhatsappNumber);
+    }
+
+    // -------------------------------------------------------------------------
+    // --- INTERACTIVE LIST MESSAGE ---
+    // -------------------------------------------------------------------------
+    public void sendListMessage(String toWhatsappNumber, String headerText, String bodyText, String buttonLabel, List<Map<String, Object>> sections) {
+        try {
+            Map<String, Object> action = new HashMap<>();
+            action.put("button", buttonLabel);
+            action.put("sections", sections);
+
+            Map<String, Object> interactive = new HashMap<>();
+            interactive.put("type", "list");
+            interactive.put("header", Map.of("type", "text", "text", headerText));
+            interactive.put("body", Map.of("text", bodyText));
+            interactive.put("footer", Map.of("text", "EasyFind Ordering"));
+            interactive.put("action", action);
+
+            sendInteractiveMessage(toWhatsappNumber, interactive);
+        } catch (Exception e) {
+            System.err.println("Failed to send List Message: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // --- INTERACTIVE BUTTON MESSAGE ---
+    // -------------------------------------------------------------------------
+    public void sendButtonMessage(String toWhatsappNumber, String bodyText, List<Map<String, String>> buttons) {
+        if (buttons.size() > 3) {
+            System.err.println("ERROR: WhatsApp only allows a maximum of 3 Reply Buttons.");
+            sendTextMessage(toWhatsappNumber, "An error occurred generating options.");
+            return; 
+        }
+
+        try {
+            List<Map<String, Object>> actionButtons = new ArrayList<>();
+            for (Map<String, String> button : buttons) {
+                Map<String, Object> buttonMap = new HashMap<>();
+                buttonMap.put("type", "reply");
+                buttonMap.put("reply", Map.of("id", button.get("id"), "title", button.get("title")));
+                actionButtons.add(buttonMap);
+            }
+
+            Map<String, Object> action = new HashMap<>();
+            action.put("buttons", actionButtons);
+
+            Map<String, Object> interactive = new HashMap<>();
+            interactive.put("type", "button");
+            interactive.put("body", Map.of("text", bodyText));
+            interactive.put("footer", Map.of("text", "EasyFind Ordering"));
+            interactive.put("action", action);
+
+            sendInteractiveMessage(toWhatsappNumber, interactive);
+        } catch (Exception e) {
+            System.err.println("Failed to send Button Message: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // --- POST-ADD-TO-CART MESSAGE ---
+    // -------------------------------------------------------------------------
+    public void sendPostAddToCartOptions(String toWhatsappNumber, String confirmationMessage) {
+        List<Map<String, String>> buttons = new ArrayList<>();
+        buttons.add(Map.of("id", "BUTTON_VIEW_CART", "title", "🛒 View Cart"));
+        buttons.add(Map.of("id", "BUTTON_ADD_MORE", "title", "➕ Continue Shopping"));
+        sendButtonMessage(toWhatsappNumber, confirmationMessage, buttons);
+    }
+}
