@@ -23,7 +23,7 @@ public class WhatsappApiService {
     @Value("${whatsapp.api.url}")
     private String API_URL;
 
-    // --- Template Names ---
+    //Template Names 
     private static final String WELCOME_MESSAGE_TEMPLATE = "welcome_message";
     private static final String ADDRESS_REQUEST_TEMPLATE = "address_request";
 
@@ -35,10 +35,8 @@ public class WhatsappApiService {
         this.restTemplate = restTemplate;
     }
 
-    // -------------------------------------------------------------------------
-    // --- CORE SEND METHOD ---
-    // -------------------------------------------------------------------------
-    private void sendRequest(Map<String, Object> requestBody, String toWhatsappNumber) {
+      // Core Send Method
+      private void sendRequest(Map<String, Object> requestBody, String toWhatsappNumber) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(ACCESS_TOKEN);
@@ -56,10 +54,8 @@ public class WhatsappApiService {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // --- TEXT MESSAGE ---
-    // -------------------------------------------------------------------------
-    public void sendTextMessage(String toWhatsappNumber, String messageText) {
+      // TEXT MESSAGE 
+       public void sendTextMessage(String toWhatsappNumber, String messageText) {
         Map<String, Object> textMessageBody = Map.of("body", messageText);
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("messaging_product", "whatsapp");
@@ -69,9 +65,7 @@ public class WhatsappApiService {
         sendRequest(requestBody, toWhatsappNumber);
     }
 
-    // -------------------------------------------------------------------------
-    // --- IMAGE MESSAGE (NEW) ---
-    // -------------------------------------------------------------------------
+    // Image Message
     /**
      * Sends an image from a public URL.
      * @param toWhatsappNumber The recipient's number.
@@ -94,10 +88,8 @@ public class WhatsappApiService {
         sendRequest(requestBody, toWhatsappNumber);
     }
 
-    // -------------------------------------------------------------------------
-    // --- TEMPLATE MESSAGES ---
-    // -------------------------------------------------------------------------
-    public void sendWelcomeTemplate(String toWhatsappNumber) {
+   // Template Message
+       public void sendWelcomeTemplate(String toWhatsappNumber) {
         sendTemplateMessage(toWhatsappNumber, WELCOME_MESSAGE_TEMPLATE, LANGUAGE_CODE, Collections.emptyList(), Collections.emptyList());
     }
 
@@ -144,10 +136,9 @@ public class WhatsappApiService {
         sendRequest(requestBody, toWhatsappNumber);
     }
 
-    // -------------------------------------------------------------------------
-    // --- INTERACTIVE MESSAGE (Generic Helper) ---
-    // -------------------------------------------------------------------------
-    private void sendInteractiveMessage(String toWhatsappNumber, Map<String, Object> interactiveObject) {
+ 
+    // Interactive Message
+     private void sendInteractiveMessage(String toWhatsappNumber, Map<String, Object> interactiveObject) {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("messaging_product", "whatsapp");
         requestBody.put("to", toWhatsappNumber);
@@ -156,9 +147,7 @@ public class WhatsappApiService {
         sendRequest(requestBody, toWhatsappNumber);
     }
 
-    // -------------------------------------------------------------------------
-    // --- INTERACTIVE LIST MESSAGE ---
-    // -------------------------------------------------------------------------
+    // Interactive List Message
     public void sendListMessage(String toWhatsappNumber, String headerText, String bodyText, String buttonLabel, List<Map<String, Object>> sections) {
         try {
             Map<String, Object> action = new HashMap<>();
@@ -179,10 +168,8 @@ public class WhatsappApiService {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // --- INTERACTIVE BUTTON MESSAGE ---
-    // -------------------------------------------------------------------------
-    public void sendButtonMessage(String toWhatsappNumber, String bodyText, List<Map<String, String>> buttons) {
+        // Interactive Button Message
+        public void sendButtonMessage(String toWhatsappNumber, String bodyText, List<Map<String, String>> buttons) {
         if (buttons.size() > 3) {
             System.err.println("ERROR: WhatsApp only allows a maximum of 3 Reply Buttons.");
             sendTextMessage(toWhatsappNumber, "An error occurred generating options.");
@@ -214,10 +201,9 @@ public class WhatsappApiService {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // --- POST-ADD-TO-CART MESSAGE ---
-    // -------------------------------------------------------------------------
-    public void sendPostAddToCartOptions(String toWhatsappNumber, String confirmationMessage) {
+    
+    //Post Add To Cart Message
+        public void sendPostAddToCartOptions(String toWhatsappNumber, String confirmationMessage) {
         List<Map<String, String>> buttons = new ArrayList<>();
         buttons.add(Map.of("id", "BUTTON_VIEW_CART", "title", "🛒 View Cart"));
         buttons.add(Map.of("id", "BUTTON_ADD_MORE", "title", "➕ Continue Shopping"));
