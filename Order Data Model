@@ -1,27 +1,234 @@
-package com.example.whatsappordering;
+package com.easyfind.whatsapp.ordering_system.entity;
 
-import lombok.Data;
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.mapping.Document;
+import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
-@Data // Lombok annotation to generate getters, setters, toString, etc.
-@Document(collection = "orders") // Marks this class as a MongoDB document
+@Entity
+@Table(name = "orders")
 public class Order {
 
-    @Id
-    private String id;
-    private String customerNumber;
-    private String item;
-    private int quantity;
-    private String deliveryAddress;
-    private String status = "Pending";
-    private LocalDateTime createdAt = LocalDateTime.now();
+	@Id
+	@GeneratedValue(strategy = GenerationType.IDENTITY)
+	private Long id;
 
-    public Order(String customerNumber, String item, int quantity, String deliveryAddress) {
-        this.customerNumber = customerNumber;
-        this.item = item;
-        this.quantity = quantity;
-        this.deliveryAddress = deliveryAddress;
-    }
+	@ManyToOne(fetch = FetchType.LAZY)
+	@JoinColumn(name = "customer_id", nullable = false)
+	private Customer customer;
+
+	@ManyToOne(fetch = FetchType.LAZY)
+	@JoinColumn(name = "franchise_id", nullable = false)
+	private Franchise franchise;
+
+	public enum Status {
+		PENDING_PAYMENT, PROCESSING, COMPLETED, CANCELLED, FAILED_PAYMENT
+	}
+
+	@Enumerated(EnumType.STRING)
+	@Column(name = "order_status", length = 50)
+	private Status orderStatus;
+
+	// --- FINANCIAL FIELDS ---
+
+	@Column(name = "subtotal_amount", nullable = false, precision = 10, scale = 2)
+	private BigDecimal subtotalAmount = BigDecimal.ZERO;
+
+	@Column(name = "service_fee_rate", nullable = false, precision = 4, scale = 3)
+	private BigDecimal serviceFeeRate = BigDecimal.ZERO;
+
+	@Column(name = "service_fee_amount", nullable = false, precision = 10, scale = 2)
+	private BigDecimal serviceFeeAmount = BigDecimal.ZERO;
+
+	// --- NEW LOGISTICS FIELDS ---
+
+	@Column(name = "delivery_fee", nullable = false, precision = 10, scale = 2)
+	private BigDecimal deliveryFee = BigDecimal.ZERO; // Amount for the driver
+
+	@Column(name = "tip_amount", nullable = false, precision = 10, scale = 2)
+	private BigDecimal tipAmount = BigDecimal.ZERO; // Extra for the driver
+
+	@Column(name = "distance_km")
+	private Double distanceKm; // Stored distance between Franchise and Customer
+
+	// --- FINAL TOTAL ---
+
+	@Column(name = "final_customer_amount", nullable = false, precision = 10, scale = 2)
+	private BigDecimal finalCustomerAmount = BigDecimal.ZERO;
+
+	// --- ITEM AND ADDRESS FIELDS ---
+
+	@OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+	private List<OrderItem> items;
+
+	@Column(name = "delivery_address", length = 255)
+	private String deliveryAddress;
+
+	@Column(name = "latitude")
+	private Double latitude;
+
+	@Column(name = "longitude")
+	private Double longitude;
+
+	// --- DATE FIELDS ---
+
+	@Column(name = "created_at", nullable = false)
+	private LocalDateTime createdAt;
+
+	@Column(name = "updated_at")
+	private LocalDateTime updatedAt;
+
+	// --- Getters and Setters (New Fields Added Below) ---
+
+	public BigDecimal getDeliveryFee() {
+		return deliveryFee;
+	}
+
+	public void setDeliveryFee(BigDecimal deliveryFee) {
+		this.deliveryFee = deliveryFee;
+	}
+
+	public BigDecimal getTipAmount() {
+		return tipAmount;
+	}
+
+	public void setTipAmount(BigDecimal tipAmount) {
+		this.tipAmount = tipAmount;
+	}
+
+	public Double getDistanceKm() {
+		return distanceKm;
+	}
+
+	public void setDistanceKm(Double distanceKm) {
+		this.distanceKm = distanceKm;
+	}
+
+	// Inside the Order class fields
+	@ManyToOne(fetch = FetchType.LAZY)
+	@JoinColumn(name = "driver_id")
+	private Driver driver;
+
+	// Add these to your Getters/Setters section
+	public Driver getDriver() {
+		return driver;
+	}
+
+	public void setDriver(Driver driver) {
+		this.driver = driver;
+	}
+
+	// --- Existing Getters and Setters ---
+
+	public Long getId() {
+		return id;
+	}
+
+	public void setId(Long id) {
+		this.id = id;
+	}
+
+	public Customer getCustomer() {
+		return customer;
+	}
+
+	public void setCustomer(Customer customer) {
+		this.customer = customer;
+	}
+
+	public Franchise getFranchise() {
+		return franchise;
+	}
+
+	public void setFranchise(Franchise franchise) {
+		this.franchise = franchise;
+	}
+
+	public Status getOrderStatus() {
+		return orderStatus;
+	}
+
+	public void setOrderStatus(Status orderStatus) {
+		this.orderStatus = orderStatus;
+	}
+
+	public BigDecimal getSubtotalAmount() {
+		return subtotalAmount;
+	}
+
+	public void setSubtotalAmount(BigDecimal subtotalAmount) {
+		this.subtotalAmount = subtotalAmount;
+	}
+
+	public BigDecimal getServiceFeeRate() {
+		return serviceFeeRate;
+	}
+
+	public void setServiceFeeRate(BigDecimal serviceFeeRate) {
+		this.serviceFeeRate = serviceFeeRate;
+	}
+
+	public BigDecimal getServiceFeeAmount() {
+		return serviceFeeAmount;
+	}
+
+	public void setServiceFeeAmount(BigDecimal serviceFeeAmount) {
+		this.serviceFeeAmount = serviceFeeAmount;
+	}
+
+	public BigDecimal getFinalCustomerAmount() {
+		return finalCustomerAmount;
+	}
+
+	public void setFinalCustomerAmount(BigDecimal finalCustomerAmount) {
+		this.finalCustomerAmount = finalCustomerAmount;
+	}
+
+	public List<OrderItem> getItems() {
+		return items;
+	}
+
+	public void setItems(List<OrderItem> items) {
+		this.items = items;
+	}
+
+	public String getDeliveryAddress() {
+		return deliveryAddress;
+	}
+
+	public void setDeliveryAddress(String deliveryAddress) {
+		this.deliveryAddress = deliveryAddress;
+	}
+
+	public Double getLatitude() {
+		return latitude;
+	}
+
+	public void setLatitude(Double latitude) {
+		this.latitude = latitude;
+	}
+
+	public Double getLongitude() {
+		return longitude;
+	}
+
+	public void setLongitude(Double longitude) {
+		this.longitude = longitude;
+	}
+
+	public LocalDateTime getCreatedAt() {
+		return createdAt;
+	}
+
+	public void setCreatedAt(LocalDateTime createdAt) {
+		this.createdAt = createdAt;
+	}
+
+	public LocalDateTime getUpdatedAt() {
+		return updatedAt;
+	}
+
+	public void setUpdatedAt(LocalDateTime updatedAt) {
+		this.updatedAt = updatedAt;
+	}
 }
